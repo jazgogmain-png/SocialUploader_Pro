@@ -2,7 +2,6 @@ package com.lola.pro
 
 import android.content.Context
 import android.net.Uri
-import android.util.Log
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.ReturnCode
 import java.io.File
@@ -14,94 +13,92 @@ object VideoKitchen {
         val caption: String,
         val overlayText: String,
         val overlayTime: String,
-        val hashtags: String
+        val placement: String = "TOP",
+        val style: String = "IMPACT_WHITE"
     )
 
     suspend fun burnSlop(
         context: Context,
         videoUri: Uri,
         recipe: SlopRecipe,
-        onLog: (String) -> Unit // <--- NEW: Live Telemetry Channel
+        onLog: (String) -> Unit
     ): Uri? {
         val inputName = "raw_input.mp4"
-        val outputName = "cooked_lola_${System.currentTimeMillis()}.mp4"
-        val fontName = "impact.ttf"
+        val outputName = "lola_pro_v53.mp4"
 
         try {
-            onLog("KITCHEN: Initializing Stove...")
+            onLog("KITCHEN: Executing Orientation-Safe Burn (V5.3)...")
 
-            // 1. Copy Video to Cache
-            val inputSwipe = File(context.cacheDir, inputName)
+            val inputFile = File(context.cacheDir, inputName)
             context.contentResolver.openInputStream(videoUri)?.use { input ->
-                FileOutputStream(inputSwipe).use { output ->
-                    input.copyTo(output)
-                }
-            }
-            onLog("KITCHEN: Video cached (${inputSwipe.length() / 1024} KB)")
-
-            // 2. Setup Font
-            val fontFile = File(context.cacheDir, fontName)
-            if (!fontFile.exists()) {
-                context.assets.open("font.ttf").use { input ->
-                    FileOutputStream(fontFile).use { output ->
-                        input.copyTo(output)
-                    }
-                }
-                onLog("KITCHEN: Font asset deployed.")
+                FileOutputStream(inputFile).use { output -> input.copyTo(output) }
             }
 
-            // 3. Prepare Overlay Data
-            // Escape colons and single quotes for FFmpeg
-            val cleanText = recipe.overlayText.replace(":", "\\:").replace("'", "")
-            val triggerTime = recipe.overlayTime.toFloatOrNull() ?: 2.0f
-            val startTime = triggerTime
-            val endTime = triggerTime + 1.5f // Flash for 1.5 seconds
-
+            val masterFont = copyFontToInternal(context, "font.ttf")
+            val fontPath = masterFont.absolutePath.replace(":", "\\:")
             val outputFile = File(context.cacheDir, outputName)
-            if (outputFile.exists()) outputFile.delete()
 
-            // 4. The FFmpeg Command (The Magic Spell)
-            // Draws text in center, appearing at startTime and disappearing at endTime
-            // Yellow text, black border (classic meme style)
-            val cmd = "-i ${inputSwipe.absolutePath} " +
-                    "-vf \"drawtext=fontfile=${fontFile.absolutePath}:" +
-                    "text='$cleanText':" +
-                    "fontcolor=yellow:fontsize=H/10:" +
-                    "borderw=5:bordercolor=black:" +
-                    "x=(w-text_w)/2:y=(h-text_h)/2:" +
-                    "enable='between(t,$startTime,$endTime)'\" " +
-                    "-c:v libx264 -preset ultrafast -crf 28 -c:a copy ${outputFile.absolutePath}"
+            // 1. Precise Timing
+            val startTime = recipe.overlayTime.replace(Regex("[^0-9.]"), "").toFloatOrNull() ?: 1.0f
+            val endTime = startTime + 2.5f
 
-            onLog("KITCHEN: Firing FFmpeg Command...")
+            // 2. THE EMOJI EXORCISM
+            // Strips everything but letters, numbers, and basic punctuation
+            val cleanText = recipe.overlayText.replace(Regex("[^\\p{L}\\p{N}\\s?!.,]"), "")
+                .replace("'", "")
+                .trim()
 
-            // 5. Execute Synchronously
+            val wrappedText = wrapText(cleanText, 20).replace(":", "\\:")
+
+            // 3. THE 9:16 NUCLEAR FILTER GRAPH
+            // Force 1080p, then draw text at h/10 (High Hook Zone)
+            val filterGraph = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1," +
+                    "drawtext=fontfile='$fontPath':text='$wrappedText':fontcolor=white:borderw=12:bordercolor=black:" +
+                    "fontsize=90:box=1:boxcolor=black@0.4:boxborderw=20:line_spacing=15:x=(w-tw)/2:y=h/10:" +
+                    "enable=between(t\\,$startTime\\,$endTime)," +
+                    "drawtext=fontfile='$fontPath':text='@YesAiDidThis':fontcolor=white@0.2:fontsize=35:x=w-tw-40:y=h-th-220"
+
+            // 4. THE COMMAND (Back to a single string for type compatibility)
+            val cmd = "-y -i ${inputFile.absolutePath} -vf \"$filterGraph\" -c:v libx264 -preset superfast -crf 18 -c:a copy ${outputFile.absolutePath}"
+
+            onLog("PHASE 2: BARTERING WITH FFMPEG...")
             val session = FFmpegKit.execute(cmd)
 
-            if (ReturnCode.isSuccess(session.returnCode)) {
-                onLog("KITCHEN: SUCCESS! Slop served @ ${outputFile.absolutePath}")
-                return Uri.fromFile(outputFile)
+            return if (ReturnCode.isSuccess(session.returnCode)) {
+                onLog("SUCCESS: @YesAiDidThis RC3 complete. Check the high-zone!")
+                Uri.fromFile(outputFile)
             } else {
-                onLog("KITCHEN: FAILURE. Return Code: ${session.returnCode}")
-                onLog("KITCHEN: Logs: ${session.logsAsString}") // Dump error to nerd window
-                return null
+                onLog("ERR: Filter Stall. Check Nerd Window.")
+                null
             }
-
         } catch (e: Exception) {
-            onLog("KITCHEN CRASH: ${e.message}")
-            e.printStackTrace()
+            onLog("ERR: Kitchen Crash: ${e.message}")
             return null
         }
     }
 
-    // Helper to parse Gemini response strictly
-    fun parseGeminiRaw(raw: String): SlopRecipe {
-        // Fallback defaults
-        var cap = "Lola Drifting #fyp"
-        var overlay = "WAIT FOR IT"
-        var time = "2"
+    private fun wrapText(text: String, lineLength: Int): String {
+        val words = text.split(" ")
+        val sb = StringBuilder()
+        var currentLineLength = 0
+        for (word in words) {
+            if (currentLineLength + word.length > lineLength) {
+                sb.append("\n")
+                currentLineLength = 0
+            }
+            sb.append(word).append(" ")
+            currentLineLength += word.length + 1
+        }
+        return sb.toString().trim()
+    }
 
-        // This is now handled mostly in MainActivity,
-        // but kept here as a backup utility
-        return SlopRecipe(cap, overlay, time, "")
+    private fun copyFontToInternal(context: Context, fontName: String): File {
+        val folder = File(context.cacheDir, "fonts")
+        if (!folder.exists()) folder.mkdirs()
+        val fontFile = File(folder, fontName)
+        context.assets.open("fonts/$fontName").use { input ->
+            FileOutputStream(fontFile).use { output -> input.copyTo(output) }
+        }
+        return fontFile
     }
 }
