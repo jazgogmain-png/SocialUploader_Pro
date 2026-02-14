@@ -1,5 +1,6 @@
 package com.lola.pro
 
+import android.app.Activity
 import android.content.*
 import android.net.Uri
 import android.os.Bundle
@@ -33,6 +34,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
+import androidx.lifecycle.lifecycleScope
 import androidx.work.*
 import com.google.ai.client.generativeai.GenerativeModel
 import com.google.ai.client.generativeai.type.BlockThreshold
@@ -56,7 +58,7 @@ object SlopLogger {
 }
 
 class MainActivity : ComponentActivity() {
-    private val PREFS_NAME = "LolaVault"
+    private val PREFS_NAME = "lola_vault"
     private var isLoggedIn by mutableStateOf(false)
     private var uploadCount by mutableStateOf(0)
 
@@ -76,9 +78,28 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val authManager = TikTokAuthManager(this)
+        val authCode = authManager.handleAuthResponse(intent)
+        if (authCode != null) {
+            SlopLogger.log("AUTH: Code intercepted! Trading for token...")
+            lifecycleScope.launch {
+                val token = authManager.getAccessToken(authCode)
+                if (token != null) {
+                    SlopLogger.log("SUCCESS: Sentinel is now LIVE. Token secured.")
+                    isLoggedIn = true
+                } else {
+                    SlopLogger.log("ERR: Token exchange failed.")
+                }
+            }
+        }
+    }
+
     private fun checkLoginStatus() {
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        isLoggedIn = !prefs.getString("ACCESS_TOKEN", null).isNullOrEmpty()
+        val token = TikTokAuthManager(this).getSavedToken()
+        isLoggedIn = !token.isNullOrEmpty()
     }
 
     private fun checkQuota() {
@@ -93,20 +114,26 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startLogin() {
-        SlopLogger.log("AUTH: Handshake requested.")
-        Toast.makeText(this, "Connect TikTok logic preserved.", Toast.LENGTH_SHORT).show()
+        SlopLogger.log("AUTH: Initializing Handshake...")
+        try {
+            TikTokAuthManager(this).login()
+            SlopLogger.log("AUTH: Handshake Dispatched.")
+        } catch (e: Exception) {
+            SlopLogger.log("ERR: Handshake Failed: ${e.message}")
+        }
     }
 
     private fun startUploadWorker(uri: Uri, caption: String) {
         if (uploadCount >= 5) return
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val token = TikTokAuthManager(this).getSavedToken()
         val data = Data.Builder()
-            .putString("TOKEN", prefs.getString("ACCESS_TOKEN", ""))
+            .putString("TOKEN", token)
             .putString("VIDEO_URI", uri.toString())
             .putString("CAPTION", caption)
             .build()
         WorkManager.getInstance(this).enqueue(OneTimeWorkRequestBuilder<UploadWorker>().setInputData(data).build())
         uploadCount++
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().putInt("COUNT", uploadCount).apply()
         SlopLogger.log("SUCCESS: 201 Salute! Task $uploadCount dispatched.")
     }
@@ -122,24 +149,19 @@ fun LolaDashboard(isLoggedIn: Boolean, uploadCount: Int, onLoginClick: () -> Uni
     var selectedUri by remember { mutableStateOf<Uri?>(null) }
     var cookedUri by remember { mutableStateOf<Uri?>(null) }
 
-    // UI Metadata Lists
     var taglishCaptions by remember { mutableStateOf(listOf<String>()) }
     var taglishHashtags by remember { mutableStateOf("") }
     var englishCaptions by remember { mutableStateOf(listOf<String>()) }
     var englishHashtags by remember { mutableStateOf("") }
-
-    var overlayText by remember { mutableStateOf("WAIT FOR IT") }
-    var overlayTime by remember { mutableStateOf("1.5") }
-    var overlayPlacement by remember { mutableStateOf("MIDDLE") }
-    var overlayStyle by remember { mutableStateOf("IMPACT_WHITE") }
+    var directorText by remember { mutableStateOf("") }
 
     var viewMode by remember { mutableStateOf("TAGLISH") }
-    var directorText by remember { mutableStateOf("") }
     var isCooking by remember { mutableStateOf(false) }
     var isGeminiThinking by remember { mutableStateOf(false) }
 
-    var geminiKeyPool by remember { mutableStateOf(BuildConfig.GEMINI_API_KEY) }
-    var systemPrompt by remember { mutableStateOf("Professional stunt production. Grandma Drifting actor.") }
+    val authManager = remember { TikTokAuthManager(context as Activity) }
+    var geminiKeyPool by remember { mutableStateOf(authManager.getApiKeys()) }
+    var systemPrompt by remember { mutableStateOf(authManager.getPrompts()) }
     var showEngineRoom by remember { mutableStateOf(false) }
 
     val videoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
@@ -164,17 +186,11 @@ fun LolaDashboard(isLoggedIn: Boolean, uploadCount: Int, onLoginClick: () -> Uni
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState())) {
 
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(140.dp)
-                    .background(Color(0xFF0D0D0D))
-                    .border(width = 1.dp, color = Color(0xFF1E1E1E), shape = RoundedCornerShape(0.dp))
-            ) {
+            Box(modifier = Modifier.fillMaxWidth().height(140.dp).background(Color(0xFF0D0D0D)).border(1.dp, Color(0xFF1E1E1E))) {
                 val listState = rememberLazyListState()
                 LaunchedEffect(SlopLogger.logs.size) { if (SlopLogger.logs.isNotEmpty()) listState.animateScrollToItem(SlopLogger.logs.size - 1) }
                 LazyColumn(state = listState, modifier = Modifier.padding(8.dp).fillMaxSize()) {
-                    items(SlopLogger.logs) { log ->
+                    items(items = SlopLogger.logs) { log ->
                         val color = if (log.contains("ERR") || log.contains("FAILED")) Color.Red else Color(0xFF00FF00)
                         Text(log, color = color, fontFamily = FontFamily.Monospace, fontSize = 10.sp, lineHeight = 12.sp)
                     }
@@ -182,18 +198,6 @@ fun LolaDashboard(isLoggedIn: Boolean, uploadCount: Int, onLoginClick: () -> Uni
             }
 
             Column(modifier = Modifier.padding(16.dp)) {
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    val statusColor = if (uploadCount >= 5) Color.Red else if (isLoggedIn) Color.Green else Color.Yellow
-                    Badge(containerColor = statusColor) {
-                        Text(if (uploadCount >= 5) "QUOTA DEPLETED" else if (isLoggedIn) "SENTINEL ACTIVE" else "OFFLINE", color = Color.Black)
-                    }
-                    Spacer(Modifier.width(8.dp))
-                    Text("Salutes: $uploadCount/5", color = Color.Gray, fontSize = 12.sp)
-                }
-
-                Spacer(Modifier.height(20.dp))
-
                 Button(
                     onClick = { videoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)) },
                     modifier = Modifier.fillMaxWidth(),
@@ -204,62 +208,49 @@ fun LolaDashboard(isLoggedIn: Boolean, uploadCount: Int, onLoginClick: () -> Uni
 
                 Spacer(Modifier.height(20.dp))
 
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(selected = viewMode == "TAGLISH", onClick = { viewMode = "TAGLISH"; SlopLogger.log("UI: Set -> Taglish") }, label = { Text("🇵🇭 Lola Mix") }, colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Color.Yellow))
-                    FilterChip(selected = viewMode == "ENGLISH", onClick = { viewMode = "ENGLISH"; SlopLogger.log("UI: Set -> English") }, label = { Text("🌎 Int'l Hook") }, colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Color.Cyan))
-                }
-
                 Button(
                     onClick = {
                         if (selectedUri == null) return@Button
                         scope.launch {
                             isGeminiThinking = true
-                            val keys = geminiKeyPool.split(Regex("[\\n\\r,]+")).map { it.trim() }.filter { it.isNotEmpty() }
-                            val activeKey = if (keys.isNotEmpty()) keys.random() else ""
+                            // ROLLING KEY POOL: Always fetch fresh from manager
+                            val currentKeys = authManager.getApiKeys().split(Regex("[\\n\\r, ]+")).filter { it.isNotBlank() }
+                            val activeKey = if (currentKeys.isNotEmpty()) currentKeys.random() else ""
 
-                            SlopLogger.log("GEMINI: Bartering with G3 FLASH (Pool: ${keys.size})...")
+                            if (activeKey.isEmpty()) {
+                                SlopLogger.log("ERR: No keys in Engine Room!")
+                                isGeminiThinking = false
+                                return@launch
+                            }
+
+                            SlopLogger.log("GEMINI: Bartering with G3 FLASH (Key: ...${activeKey.takeLast(4)})")
 
                             try {
-                                val safety = listOf(
-                                    SafetySetting(HarmCategory.HARASSMENT, BlockThreshold.NONE),
-                                    SafetySetting(HarmCategory.DANGEROUS_CONTENT, BlockThreshold.NONE)
+                                val model = GenerativeModel(
+                                    modelName = "gemini-3-flash-preview",
+                                    apiKey = activeKey,
+                                    safetySettings = listOf(SafetySetting(HarmCategory.HARASSMENT, BlockThreshold.NONE))
                                 )
-                                val model = GenerativeModel(modelName = "gemini-3-flash-preview", apiKey = activeKey, safetySettings = safety)
-
                                 val masterPrompt = """
                                     CONTEXT: $systemPrompt
-                                    TASK: Analyze video. Output viral metadata. 
-                                    STYLE: Fresh Filipino/Conyo Taglish + mandatory emojis 🔥.
                                     STRICT OUTPUT FORMAT:
-                                    TAGLISH_CAPTIONS: [C1, C2, C3, C4, C5, C6]
-                                    TAGLISH_TAGS: [#Tag1 #Tag2 #Tag3 #Tag4 #LolaDrifting]
-                                    ENGLISH_CAPTIONS: [E1, E2, E3]
-                                    ENGLISH_TAGS: [#Tag1 #Tag2 #Tag3 #Tag4 #LolaDrifting]
-                                    OVERLAY_TEXT: [Viral Hook]
-                                    OVERLAY_TIME: [1.5]
-                                    OVERLAY_PLACEMENT: [MIDDLE]
-                                    OVERLAY_STYLE: [IMPACT_WHITE]
+                                    TAGLISH_CAPTIONS: [C1, C2, C3]
+                                    TAGLISH_TAGS: [#LolaDrifting #AdoboTurbo]
+                                    ENGLISH_CAPTIONS: [E1, E2]
+                                    ENGLISH_TAGS: [#GrandmaChaos]
                                 """.trimIndent()
 
-                                val response = model.generateContent(content { text(masterPrompt) })
+                                val response = withContext(Dispatchers.IO) { model.generateContent(content { text(masterPrompt) }) }
                                 val rawText = response.text ?: ""
 
-                                Log.d("lola_gemini", "RAW: $rawText")
-
-                                // PARSER (Capped for Scroll-Safety)
-                                val taglishData = Regex("TAGLISH_CAPTIONS: \\[(.*?)\\]", RegexOption.DOT_MATCHES_ALL).find(rawText)?.groupValues?.get(1)?.split(",")?.map { it.trim() } ?: emptyList()
-                                taglishCaptions = taglishData.take(6)
+                                // GREEDY PARSER
+                                taglishCaptions = Regex("TAGLISH_CAPTIONS: \\[(.*?)\\]").find(rawText)?.groupValues?.get(1)?.split(",")?.map { it.trim() } ?: emptyList()
                                 taglishHashtags = Regex("TAGLISH_TAGS: \\[(.*?)\\]").find(rawText)?.groupValues?.get(1) ?: ""
-
-                                val englishData = Regex("ENGLISH_CAPTIONS: \\[(.*?)\\]", RegexOption.DOT_MATCHES_ALL).find(rawText)?.groupValues?.get(1)?.split(",")?.map { it.trim() } ?: emptyList()
-                                englishCaptions = englishData.take(3)
+                                englishCaptions = Regex("ENGLISH_CAPTIONS: \\[(.*?)\\]").find(rawText)?.groupValues?.get(1)?.split(",")?.map { it.trim() } ?: emptyList()
                                 englishHashtags = Regex("ENGLISH_TAGS: \\[(.*?)\\]").find(rawText)?.groupValues?.get(1) ?: ""
 
-                                overlayText = Regex("OVERLAY_TEXT: \\[(.*?)\\]").find(rawText)?.groupValues?.get(1) ?: Regex("OVERLAY_TEXT: (.*)").find(rawText)?.groupValues?.get(1) ?: "WAIT FOR IT"
-                                overlayTime = Regex("OVERLAY_TIME: \\[(.*?)\\]").find(rawText)?.groupValues?.get(1) ?: Regex("OVERLAY_TIME: (.*)").find(rawText)?.groupValues?.get(1) ?: "1.5"
-
-                                SlopLogger.log("SUCCESS: Byte-buffer refined by Elf (Keys: ${keys.size})")
-                            } catch (e: Exception) { SlopLogger.log("ERR: Elf fell asleep: ${e.message}") }
+                                SlopLogger.log("SUCCESS: Content refined.")
+                            } catch (e: Exception) { SlopLogger.log("ERR: Gemini stalled: ${e.message}") }
                             isGeminiThinking = false
                         }
                     },
@@ -276,74 +267,34 @@ fun LolaDashboard(isLoggedIn: Boolean, uploadCount: Int, onLoginClick: () -> Uni
 
                 if (currentOptions.isNotEmpty()) {
                     Spacer(Modifier.height(12.dp))
-
-                    FlowRow(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        maxItemsInEachRow = 3
-                    ) {
-                        currentOptions.forEachIndexed { index, caption ->
+                    FlowRow(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        currentOptions.forEach { caption ->
                             Button(
                                 onClick = {
-                                    val cleanCaption = caption.replace("[", "").replace("]", "").trim()
-                                    directorText = "$cleanCaption $currentTags"
+                                    directorText = "$caption $currentTags"
                                     clipboardManager.setText(AnnotatedString(directorText))
-                                    SlopLogger.log("UI: Option #${index+1} selected.")
+                                    SlopLogger.log("UI: Hook selected & copied.")
                                 },
-                                modifier = Modifier.weight(1f).padding(bottom = 4.dp),
+                                modifier = Modifier.padding(bottom = 4.dp),
                                 colors = ButtonDefaults.buttonColors(containerColor = Color.DarkGray)
-                            ) {
-                                Text("#${index + 1}")
-                            }
+                            ) { Text(caption, fontSize = 10.sp) }
                         }
                     }
-
                     OutlinedTextField(
                         value = directorText,
                         onValueChange = { directorText = it },
-                        modifier = Modifier.fillMaxWidth().height(100.dp).padding(top = 8.dp),
-                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp),
-                        colors = OutlinedTextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.LightGray, focusedContainerColor = Color(0xFF111111))
+                        modifier = Modifier.fillMaxWidth().height(80.dp),
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp, color = Color.White)
                     )
                 }
 
                 Spacer(Modifier.height(20.dp))
 
                 Button(
-                    onClick = {
-                        scope.launch {
-                            isCooking = true
-                            SlopLogger.log("KITCHEN: Hardening text for burn...")
-                            val recipe = VideoKitchen.SlopRecipe(directorText, overlayText, overlayTime, overlayPlacement, overlayStyle)
-                            cookedUri = withContext(Dispatchers.IO) { VideoKitchen.burnSlop(context, selectedUri!!, recipe) { msg -> SlopLogger.log(msg) } }
-                            isCooking = false
-                        }
-                    },
-                    enabled = selectedUri != null && !isCooking && directorText.isNotEmpty(),
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF9800))
-                ) {
-                    Text(if (isCooking) "BURNING..." else "🔥 THE KITCHEN (Final Burn)", color = Color.Black)
-                }
-
-                if (cookedUri != null) {
-                    Spacer(Modifier.height(12.dp))
-                    OutlinedButton(onClick = {
-                        try {
-                            val uri = FileProvider.getUriForFile(context, "com.lola.pro.fileprovider", File(cookedUri!!.path!!))
-                            val intent = Intent(Intent.ACTION_VIEW).apply { setDataAndType(uri, "video/mp4"); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }
-                            context.startActivity(Intent.createChooser(intent, "Verify the Slop"))
-                        } catch (e: Exception) { SlopLogger.log("PREVIEW_ERR: ${e.message}") }
-                    }, modifier = Modifier.fillMaxWidth()) { Text("👁️ PREVIEW SLOP", color = Color.Cyan) }
-
-                    Spacer(Modifier.height(8.dp))
-
-                    Button(
-                        onClick = { if (!isLoggedIn) onLoginClick() else onUploadTrigger(cookedUri!!, directorText) },
-                        modifier = Modifier.fillMaxWidth().height(50.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFE2C55))
-                    ) { Text(if (!isLoggedIn) "🔑 CONNECT TO TIKTOK" else "🦅 RELEASE THE BIRDS", fontWeight = FontWeight.Bold, color = Color.White) }
-                }
+                    onClick = { if (!isLoggedIn) onLoginClick() else onUploadTrigger(selectedUri!!, directorText) },
+                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFE2C55))
+                ) { Text(if (!isLoggedIn) "🔑 CONNECT TO TIKTOK" else "🦅 RELEASE THE BIRDS", fontWeight = FontWeight.Bold) }
             }
         }
     }
@@ -354,6 +305,10 @@ fun LolaDashboard(isLoggedIn: Boolean, uploadCount: Int, onLoginClick: () -> Uni
             currentPrompts = systemPrompt,
             logs = SlopLogger.logs.takeLast(6).joinToString("\n"),
             onSave = { newKeys, newPrompt ->
+                // DIRECT PERSISTENCE
+                authManager.saveApiKeys(newKeys)
+                authManager.savePrompts(newPrompt)
+                // LOCAL STATE SYNC
                 geminiKeyPool = newKeys
                 systemPrompt = newPrompt
                 SlopLogger.log("SYSTEM: Key-Pool Relay rebooted.")
