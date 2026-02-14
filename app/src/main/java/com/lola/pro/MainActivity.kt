@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
+import android.widget.VideoView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -33,7 +34,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.FileProvider
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
 import androidx.work.*
 import com.google.ai.client.generativeai.GenerativeModel
@@ -61,6 +62,7 @@ class MainActivity : ComponentActivity() {
     private val PREFS_NAME = "lola_vault"
     private var isLoggedIn by mutableStateOf(false)
     private var uploadCount by mutableStateOf(0)
+    private var lastUsedKeyIndex = -1
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -73,7 +75,9 @@ class MainActivity : ComponentActivity() {
                 isLoggedIn = isLoggedIn,
                 uploadCount = uploadCount,
                 onLoginClick = { startLogin() },
-                onUploadTrigger = { uri, caption -> startUploadWorker(uri, caption) }
+                onUploadTrigger = { uri, caption -> startUploadWorker(uri, caption) },
+                keyIndexProvider = { lastUsedKeyIndex },
+                onKeyIndexUpdate = { lastUsedKeyIndex = it }
             )
         }
     }
@@ -90,8 +94,6 @@ class MainActivity : ComponentActivity() {
                 if (token != null) {
                     SlopLogger.log("SUCCESS: Sentinel is now LIVE. Token secured.")
                     isLoggedIn = true
-                } else {
-                    SlopLogger.log("ERR: Token exchange failed.")
                 }
             }
         }
@@ -117,7 +119,6 @@ class MainActivity : ComponentActivity() {
         SlopLogger.log("AUTH: Initializing Handshake...")
         try {
             TikTokAuthManager(this).login()
-            SlopLogger.log("AUTH: Handshake Dispatched.")
         } catch (e: Exception) {
             SlopLogger.log("ERR: Handshake Failed: ${e.message}")
         }
@@ -135,29 +136,39 @@ class MainActivity : ComponentActivity() {
         uploadCount++
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().putInt("COUNT", uploadCount).apply()
-        SlopLogger.log("SUCCESS: 201 Salute! Task $uploadCount dispatched.")
+        SlopLogger.log("SUCCESS: Task $uploadCount dispatched.")
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun LolaDashboard(isLoggedIn: Boolean, uploadCount: Int, onLoginClick: () -> Unit, onUploadTrigger: (Uri, String) -> Unit) {
+fun LolaDashboard(
+    isLoggedIn: Boolean,
+    uploadCount: Int,
+    onLoginClick: () -> Unit,
+    onUploadTrigger: (Uri, String) -> Unit,
+    keyIndexProvider: () -> Int,
+    onKeyIndexUpdate: (Int) -> Unit
+) {
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
 
     var selectedUri by remember { mutableStateOf<Uri?>(null) }
-    var cookedUri by remember { mutableStateOf<Uri?>(null) }
-
     var taglishCaptions by remember { mutableStateOf(listOf<String>()) }
     var taglishHashtags by remember { mutableStateOf("") }
     var englishCaptions by remember { mutableStateOf(listOf<String>()) }
     var englishHashtags by remember { mutableStateOf("") }
+
+    var overlaySuggestion by remember { mutableStateOf("WAIT FOR IT...") }
+    var musicTips by remember { mutableStateOf("Pinoy Budots Remix") }
     var directorText by remember { mutableStateOf("") }
 
     var viewMode by remember { mutableStateOf("TAGLISH") }
-    var isCooking by remember { mutableStateOf(false) }
     var isGeminiThinking by remember { mutableStateOf(false) }
+
+    var isSeasonalMode by remember { mutableStateOf(false) }
+    var manualSeason by remember { mutableStateOf("Valentine's Day") }
 
     val authManager = remember { TikTokAuthManager(context as Activity) }
     var geminiKeyPool by remember { mutableStateOf(authManager.getApiKeys()) }
@@ -166,7 +177,6 @@ fun LolaDashboard(isLoggedIn: Boolean, uploadCount: Int, onLoginClick: () -> Uni
 
     val videoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         selectedUri = uri
-        cookedUri = null
         SlopLogger.log("VIDEO: Source URI acquired.")
     }
 
@@ -174,7 +184,7 @@ fun LolaDashboard(isLoggedIn: Boolean, uploadCount: Int, onLoginClick: () -> Uni
         containerColor = Color.Black,
         topBar = {
             TopAppBar(
-                title = { Text("🏎️ LOLA PRO v2.7", color = Color.Yellow, fontWeight = FontWeight.Bold) },
+                title = { Text("🏎️ LOLA PRO v2.9", color = Color.Yellow, fontWeight = FontWeight.Bold) },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF121212)),
                 actions = {
                     IconButton(onClick = { showEngineRoom = true }) {
@@ -186,14 +196,28 @@ fun LolaDashboard(isLoggedIn: Boolean, uploadCount: Int, onLoginClick: () -> Uni
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState())) {
 
-            Box(modifier = Modifier.fillMaxWidth().height(140.dp).background(Color(0xFF0D0D0D)).border(1.dp, Color(0xFF1E1E1E))) {
+            Box(modifier = Modifier.fillMaxWidth().height(120.dp).background(Color(0xFF0D0D0D)).border(1.dp, Color(0xFF1E1E1E))) {
                 val listState = rememberLazyListState()
                 LaunchedEffect(SlopLogger.logs.size) { if (SlopLogger.logs.isNotEmpty()) listState.animateScrollToItem(SlopLogger.logs.size - 1) }
                 LazyColumn(state = listState, modifier = Modifier.padding(8.dp).fillMaxSize()) {
                     items(items = SlopLogger.logs) { log ->
-                        val color = if (log.contains("ERR") || log.contains("FAILED")) Color.Red else Color(0xFF00FF00)
-                        Text(log, color = color, fontFamily = FontFamily.Monospace, fontSize = 10.sp, lineHeight = 12.sp)
+                        val color = if (log.contains("ERR")) Color.Red else Color(0xFF00FF00)
+                        Text(log, color = color, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
                     }
+                }
+            }
+
+            if (selectedUri != null) {
+                Box(modifier = Modifier.fillMaxWidth().height(250.dp).background(Color.DarkGray).padding(8.dp)) {
+                    AndroidView(
+                        factory = { ctx ->
+                            VideoView(ctx).apply {
+                                setVideoURI(selectedUri)
+                                setOnPreparedListener { it.isLooping = true; start() }
+                            }
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
                 }
             }
 
@@ -203,54 +227,79 @@ fun LolaDashboard(isLoggedIn: Boolean, uploadCount: Int, onLoginClick: () -> Uni
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.buttonColors(containerColor = if (selectedUri == null) Color(0xFF2196F3) else Color(0xFF4CAF50))
                 ) {
-                    Text(if (selectedUri == null) "FIND THE SLOP" else "SLOP LOADED ✅")
+                    Text(if (selectedUri == null) "FIND THE SLOP" else "SWAP VIDEO 🔄")
                 }
 
-                Spacer(Modifier.height(20.dp))
+                Spacer(Modifier.height(12.dp))
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = manualSeason,
+                        onValueChange = { manualSeason = it },
+                        modifier = Modifier.weight(1f).height(56.dp),
+                        label = { Text("Season/Event", color = Color.Gray) },
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp, color = Color.White),
+                        colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color(0xFFFF4081))
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    IconButton(
+                        onClick = { isSeasonalMode = !isSeasonalMode; SlopLogger.log("SEASON: ${if(isSeasonalMode) "ON" else "OFF"}") },
+                        modifier = Modifier.background(if(isSeasonalMode) Color(0xFFFF4081) else Color(0xFF333333), RoundedCornerShape(8.dp))
+                    ) {
+                        Icon(if(isSeasonalMode) Icons.Default.Favorite else Icons.Default.DateRange, "", tint = Color.White)
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
 
                 Button(
                     onClick = {
                         if (selectedUri == null) return@Button
                         scope.launch {
                             isGeminiThinking = true
-                            // ROLLING KEY POOL: Always fetch fresh from manager
-                            val currentKeys = authManager.getApiKeys().split(Regex("[\\n\\r, ]+")).filter { it.isNotBlank() }
-                            val activeKey = if (currentKeys.isNotEmpty()) currentKeys.random() else ""
+                            val keys = authManager.getApiKeys().split(Regex("[\\n\\r, ]+")).filter { it.isNotBlank() }
 
-                            if (activeKey.isEmpty()) {
-                                SlopLogger.log("ERR: No keys in Engine Room!")
-                                isGeminiThinking = false
-                                return@launch
+                            var success = false
+                            var attempt = 0
+                            while (!success && attempt < keys.size) {
+                                val nextIndex = (keyIndexProvider() + 1) % keys.size
+                                onKeyIndexUpdate(nextIndex)
+                                val activeKey = keys[nextIndex]
+                                attempt++
+                                try {
+                                    val model = GenerativeModel("gemini-3-flash-preview", activeKey)
+                                    val seasonalContext = if (isSeasonalMode) "THEME: Focus heavily on $manualSeason." else ""
+
+                                    val masterPrompt = """
+                                        $systemPrompt
+                                        $seasonalContext
+                                        LINGO: Pinoy TikTok Brainrot / Conyo (rizz, aura, dasurv, lock-in, forda ferson, yarn, no cap).
+                                        TASK: Output viral TikTok metadata. 
+                                        STRICT FORMAT:
+                                        TAGLISH_CAPTIONS: [C1, C2, C3]
+                                        TAGLISH_TAGS: [#LolaDrifting #PinoyBrainrot]
+                                        ENGLISH_CAPTIONS: [E1, E2]
+                                        ENGLISH_TAGS: [#GrandmaChaos]
+                                        OVERLAY: [PEAK BRAINROT HOOK - ALL CAPS - TAGLISH OK]
+                                        MUSIC: [Style]
+                                    """.trimIndent()
+
+                                    val response = withContext(Dispatchers.IO) { model.generateContent(content { text(masterPrompt) }) }
+                                    val rawText = response.text ?: ""
+
+                                    taglishCaptions = Regex("TAGLISH_CAPTIONS: \\[(.*?)\\]").find(rawText)?.groupValues?.get(1)?.split(",")?.map { it.trim() } ?: emptyList()
+                                    taglishHashtags = Regex("TAGLISH_TAGS: \\[(.*?)\\]").find(rawText)?.groupValues?.get(1) ?: ""
+                                    englishCaptions = Regex("ENGLISH_CAPTIONS: \\[(.*?)\\]").find(rawText)?.groupValues?.get(1)?.split(",")?.map { it.trim() } ?: emptyList()
+                                    englishHashtags = Regex("ENGLISH_TAGS: \\[(.*?)\\]").find(rawText)?.groupValues?.get(1) ?: ""
+                                    overlaySuggestion = Regex("OVERLAY: \\[(.*?)\\]").find(rawText)?.groupValues?.get(1) ?: Regex("OVERLAY: (.*)").find(rawText)?.groupValues?.get(1) ?: "PEAK AURA MOMENT"
+                                    musicTips = Regex("MUSIC: \\[(.*?)\\]").find(rawText)?.groupValues?.get(1) ?: "Budots Remix"
+
+                                    SlopLogger.log("SUCCESS: Relay #${nextIndex + 1} delivered."); success = true
+                                } catch (e: Exception) {
+                                    if (e.message?.contains("quota") == true) SlopLogger.log("RELAY: #${nextIndex + 1} Depleted.")
+                                    else { SlopLogger.log("ERR: ${e.message}"); break }
+                                }
                             }
-
-                            SlopLogger.log("GEMINI: Bartering with G3 FLASH (Key: ...${activeKey.takeLast(4)})")
-
-                            try {
-                                val model = GenerativeModel(
-                                    modelName = "gemini-3-flash-preview",
-                                    apiKey = activeKey,
-                                    safetySettings = listOf(SafetySetting(HarmCategory.HARASSMENT, BlockThreshold.NONE))
-                                )
-                                val masterPrompt = """
-                                    CONTEXT: $systemPrompt
-                                    STRICT OUTPUT FORMAT:
-                                    TAGLISH_CAPTIONS: [C1, C2, C3]
-                                    TAGLISH_TAGS: [#LolaDrifting #AdoboTurbo]
-                                    ENGLISH_CAPTIONS: [E1, E2]
-                                    ENGLISH_TAGS: [#GrandmaChaos]
-                                """.trimIndent()
-
-                                val response = withContext(Dispatchers.IO) { model.generateContent(content { text(masterPrompt) }) }
-                                val rawText = response.text ?: ""
-
-                                // GREEDY PARSER
-                                taglishCaptions = Regex("TAGLISH_CAPTIONS: \\[(.*?)\\]").find(rawText)?.groupValues?.get(1)?.split(",")?.map { it.trim() } ?: emptyList()
-                                taglishHashtags = Regex("TAGLISH_TAGS: \\[(.*?)\\]").find(rawText)?.groupValues?.get(1) ?: ""
-                                englishCaptions = Regex("ENGLISH_CAPTIONS: \\[(.*?)\\]").find(rawText)?.groupValues?.get(1)?.split(",")?.map { it.trim() } ?: emptyList()
-                                englishHashtags = Regex("ENGLISH_TAGS: \\[(.*?)\\]").find(rawText)?.groupValues?.get(1) ?: ""
-
-                                SlopLogger.log("SUCCESS: Content refined.")
-                            } catch (e: Exception) { SlopLogger.log("ERR: Gemini stalled: ${e.message}") }
                             isGeminiThinking = false
                         }
                     },
@@ -262,37 +311,39 @@ fun LolaDashboard(isLoggedIn: Boolean, uploadCount: Int, onLoginClick: () -> Uni
                     else Text("REFINE CONTENT (PANSIT SPEED)")
                 }
 
-                val currentOptions = if (viewMode == "TAGLISH") taglishCaptions else englishCaptions
-                val currentTags = if (viewMode == "TAGLISH") taglishHashtags else englishHashtags
+                if (taglishCaptions.isNotEmpty()) {
+                    Spacer(Modifier.height(16.dp))
+                    Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1A1A))) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Text("🎬 DIRECTOR'S NOTES", color = Color.Yellow, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text("OVERLAY: $overlaySuggestion", color = Color.White, fontWeight = FontWeight.ExtraBold, fontSize = 18.sp)
+                            Text("MUSIC: $musicTips", color = Color.Cyan, fontSize = 12.sp)
 
-                if (currentOptions.isNotEmpty()) {
-                    Spacer(Modifier.height(12.dp))
-                    FlowRow(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        currentOptions.forEach { caption ->
-                            Button(
-                                onClick = {
-                                    directorText = "$caption $currentTags"
-                                    clipboardManager.setText(AnnotatedString(directorText))
-                                    SlopLogger.log("UI: Hook selected & copied.")
-                                },
-                                modifier = Modifier.padding(bottom = 4.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = Color.DarkGray)
-                            ) { Text(caption, fontSize = 10.sp) }
+                            Spacer(Modifier.height(8.dp))
+                            val currentOptions = if (viewMode == "TAGLISH") taglishCaptions else englishCaptions
+                            val currentTags = if (viewMode == "TAGLISH") taglishHashtags else englishHashtags
+
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                currentOptions.forEach { caption ->
+                                    Button(
+                                        onClick = {
+                                            directorText = "$caption $currentTags"
+                                            clipboardManager.setText(AnnotatedString(directorText))
+                                            SlopLogger.log("UI: Hook Copied.")
+                                        },
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color.DarkGray)
+                                    ) { Text(caption, fontSize = 10.sp) }
+                                }
+                            }
                         }
                     }
-                    OutlinedTextField(
-                        value = directorText,
-                        onValueChange = { directorText = it },
-                        modifier = Modifier.fillMaxWidth().height(80.dp),
-                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp, color = Color.White)
-                    )
                 }
 
                 Spacer(Modifier.height(20.dp))
 
                 Button(
                     onClick = { if (!isLoggedIn) onLoginClick() else onUploadTrigger(selectedUri!!, directorText) },
-                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                    modifier = Modifier.fillMaxWidth().height(55.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFE2C55))
                 ) { Text(if (!isLoggedIn) "🔑 CONNECT TO TIKTOK" else "🦅 RELEASE THE BIRDS", fontWeight = FontWeight.Bold) }
             }
@@ -305,13 +356,11 @@ fun LolaDashboard(isLoggedIn: Boolean, uploadCount: Int, onLoginClick: () -> Uni
             currentPrompts = systemPrompt,
             logs = SlopLogger.logs.takeLast(6).joinToString("\n"),
             onSave = { newKeys, newPrompt ->
-                // DIRECT PERSISTENCE
                 authManager.saveApiKeys(newKeys)
                 authManager.savePrompts(newPrompt)
-                // LOCAL STATE SYNC
                 geminiKeyPool = newKeys
                 systemPrompt = newPrompt
-                SlopLogger.log("SYSTEM: Key-Pool Relay rebooted.")
+                SlopLogger.log("SYSTEM: Engine Updated.")
                 showEngineRoom = false
             },
             onDismiss = { showEngineRoom = false }
